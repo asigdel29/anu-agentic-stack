@@ -85,9 +85,24 @@ never a tracked file. See `.env.example`.
 ## Getting started
 
 ```sh
-just toolchain   # report whether the required tools are present
-just --list      # everything else
+just toolchain                        # are the required tools present
+cargo build --release --manifest-path router/Cargo.toml
+sudo NEURALWATT_API_KEY=nw-... deploy/bootstrap-pi.sh
+deploy/install-zeromem.sh             # memory; compiles a Rust extension
+NEURALWATT_API_KEY=nw-... scripts/verify-stack.sh
 ```
+
+The router runs without a scoring head, taking the policy's unscored path. To fit
+one:
+
+```sh
+uv run --with datasets python train/fetch_dataset.py
+cargo run --release --manifest-path router/Cargo.toml --bin train-head \
+  -- train/prompts.jsonl > ~/.hermes/memory/zeromem-models/head.json
+```
+
+The head carries thresholds calibrated against its own score distribution, so
+they cannot drift apart from the weights that produced them.
 
 ## Credits
 
