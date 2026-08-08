@@ -35,7 +35,28 @@ public final class TurnDriver {
     /// row that rewrote itself would be a strange thing to scroll back through.
     public private(set) var routing: (decision: Decision, chain: [Step])?
 
+    /// Whether a turn stopped when the app left the foreground and is waiting to
+    /// be picked up.
+    public var isInterrupted: Bool {
+        if case .interrupted = transcript.rows.last { return true }
+        return false
+    }
+
+    /// Whether the tier now answering is one that runs for minutes rather than
+    /// seconds, and so is worth saying something about before somebody walks away
+    /// from it. The cheap tiers do not need a warning and would be noise.
+    public var isLong: Bool {
+        switch routing?.decision.tier {
+        case .heavy, .long: true
+        default: false
+        }
+    }
+
     private let agent: Agent
+    private var running: Task<Void, Never>?
+    /// Counts turns started. `Task` is a value type, so this rather than identity
+    /// is how a finishing turn tells whether it is still the current one.
+    private var generation = 0
 
     public init(agent: Agent) {
         self.agent = agent
@@ -56,21 +77,68 @@ public final class TurnDriver {
             return
         }
 
-        isRunning = true
         transcript.said(text)
-        defer { isRunning = false }
+        await run { await self.agent.send(text) }
+    }
 
-        do {
-            for try await event in await agent.send(text) {
-                if case .decided(let decision, let chain) = event {
-                    routing = (decision, chain)
+    /// Pick up a turn the app interrupted.
+    ///
+    /// # Rely
+    /// Called on the main actor, and only when `isInterrupted`. A round commits
+    /// atomically, so an interrupted turn left the conversation ending at the
+    /// person's own message — this asks it again rather than repairing anything,
+    /// and asks it once, because `send` would append that message a second time.
+    public func resume() async {
+        guard !isRunning, transcript.resumed() else { return }
+        await run { await self.agent.resume() }
+    }
+
+    /// Stop the turn in flight and say that it stopped, rather than leaving half
+    /// an answer that looks finished.
+    ///
+    /// # Rely
+    /// Called when the app leaves the foreground. Cancelling the task terminates
+    /// the stream, which cancels the request behind it.
+    public func interrupt() {
+        guard isRunning else { return }
+        running?.cancel()
+        running = nil
+        isRunning = false
+        transcript.interrupted()
+    }
+
+    /// Consume one turn's stream, whichever way it was started.
+    private func run(
+        _ start: @escaping @Sendable () async -> AsyncThrowingStream<TurnEvent, any Error>
+    ) async {
+        isRunning = true
+        generation += 1
+        let mine = generation
+        let task = Task { [weak self] in
+            do {
+                for try await event in await start() {
+                    guard let self, !Task.isCancelled else { return }
+                    if case .decided(let decision, let chain) = event {
+                        self.routing = (decision, chain)
+                    }
+                    self.transcript.apply(event)
                 }
-                transcript.apply(event)
+            } catch {
+                // The reason, not the type. A person reading this has no use for
+                // a case name, and `AgentError` already writes itself out in
+                // words. A cancelled turn is not a failure and says nothing here:
+                // `interrupt` has already recorded what happened.
+                guard let self, !Task.isCancelled else { return }
+                self.transcript.failed(error.localizedDescription)
             }
-        } catch {
-            // The reason, not the type. A person reading this has no use for a
-            // case name, and `AgentError` already writes itself out in words.
-            transcript.failed(error.localizedDescription)
+        }
+        running = task
+        await task.value
+        // An interrupted turn has already been replaced, or superseded by the one
+        // that resumed it. Only a turn that ran to its own end is still current.
+        if generation == mine {
+            running = nil
+            isRunning = false
         }
     }
 }

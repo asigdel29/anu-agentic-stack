@@ -19,6 +19,7 @@ import SwiftUI
 
 /// The transcript, and a field to add to it.
 public struct ConversationView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var driver: TurnDriver
     @State private var draft = ""
 
@@ -39,11 +40,29 @@ public struct ConversationView: View {
                     .frame(height: 1)
             }
             rows
+            // Only for the tiers that run for minutes. On a cheap turn this would
+            // be a warning about nothing, and a warning about nothing is one
+            // people learn to scroll past.
+            if driver.isRunning, driver.isLong {
+                Text("this tier takes minutes — leaving the app stops it")
+                    .font(.caption2.monospaced())
+                    .foregroundStyle(Theme.cyan.color.opacity(0.7))
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
             composer
         }
         .background(Theme.ground.color)
         // Dark only, so the system's own controls match rather than fight it.
         .preferredColorScheme(.dark)
+        // A turn outlives the foreground by seconds and takes minutes, so leaving
+        // is the end of it. Stopping deliberately and saying so beats being
+        // suspended partway and coming back to an answer that stopped mid-word
+        // with nothing to say it had.
+        .onChange(of: scenePhase) { _, phase in
+            if phase != .active { driver.interrupt() }
+        }
     }
 
     private var rows: some View {
@@ -104,6 +123,19 @@ public struct ConversationView: View {
             Text(reason)
                 .font(.footnote)
                 .foregroundStyle(Theme.error.color)
+
+        case .interrupted:
+            // Cyan and not error: a turn that stopped because the app went away
+            // is waiting rather than broken, and colouring it like a failure
+            // would tell somebody their work is gone when it is not.
+            Button {
+                Task { await driver.resume() }
+            } label: {
+                Text("stopped when the app went away — continue")
+                    .font(.footnote.monospaced())
+                    .foregroundStyle(Theme.cyan.color)
+            }
+            .disabled(driver.isRunning)
         }
     }
 

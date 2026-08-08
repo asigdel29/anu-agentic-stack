@@ -32,11 +32,15 @@ public enum TranscriptRow: Equatable, Sendable, Identifiable {
     /// Why the turn stopped. Terminal for that turn, and never removed: a person
     /// who saw half an answer is owed the reason the rest never came.
     case failed(id: Int, reason: String)
+    /// The turn stopped because the app went away, and can be picked up again.
+    /// Distinct from `failed` because the two ask different things of a reader:
+    /// one is over, and this one is waiting.
+    case interrupted(id: Int)
 
     public var id: Int {
         switch self {
         case .said(let id, _), .answered(let id, _, _), .used(let id, _, _),
-            .failed(let id, _):
+            .failed(let id, _), .interrupted(let id):
             id
         }
     }
@@ -112,6 +116,30 @@ public struct Transcript: Equatable, Sendable {
                 rows[index] = .used(id: id, tool: tool, result: result.content)
             }
         }
+    }
+
+    /// Record that the turn was cut short by the app leaving the foreground.
+    ///
+    /// Appends nothing if the last row already says so, because coming back and
+    /// leaving again should not stack up notices about the same stopped turn.
+    public mutating func interrupted() {
+        openAnswer = nil
+        if case .interrupted = rows.last { return }
+        rows.append(.interrupted(id: take()))
+    }
+
+    /// Drop the interruption notice, for a turn that is being picked up again.
+    ///
+    /// - Returns: whether there was one to drop, which is also the answer to
+    ///   whether there is a turn worth resuming.
+    @discardableResult
+    public mutating func resumed() -> Bool {
+        guard case .interrupted = rows.last else { return false }
+        rows.removeLast()
+        // The answer it interrupted is open again, so text arriving next
+        // continues the paragraph rather than starting a second one.
+        if case .answered = rows.last { openAnswer = rows.count - 1 }
+        return true
     }
 
     /// Record why the turn stopped, leaving everything already shown in place.
